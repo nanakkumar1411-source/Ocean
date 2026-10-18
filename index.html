@@ -851,7 +851,7 @@ function buildSpectrum(sea) {
     const k = 2 * Math.PI / L, w = om(L);
     const dw = Math.abs(om(Lmax * Math.exp(lr * (i + 0.5))) - om(Lmax * Math.exp(lr * (i - 0.5))));
     const S = Math.pow(w, -5) * Math.exp(-1.25 * Math.pow(wp / w, 4));
-    const spread = (14 + 42 * Math.pow(i / (NW - 1), 0.8)) * D2R;    // short waves come from more directions
+    const spread = (24 + 36 * Math.pow(i / (NW - 1), 0.8)) * D2R;    // waves come from a spread of directions, so no neat stripes
     const ang = WIND * D2R + jitDir[i] * spread;
     waveCPU.push({ dx: Math.sin(ang), dz: -Math.cos(ang), k, a: Math.sqrt(2 * S * dw), ph: phases[i], L });
     v += waveCPU[i].a ** 2 / 2;
@@ -859,7 +859,7 @@ function buildSpectrum(sea) {
   waveCPU.sort((a, b) => b.L - a.L);
   const scale = hs / (4 * Math.sqrt(v));
   let slope = 0, sumA = 0;
-  for (const wv of waveCPU) { wv.a *= scale; if (wv.L >= 2) { slope += wv.k * wv.a; sumA += wv.a; } }
+  for (const wv of waveCPU) { wv.a *= scale * (0.45 + 0.55 * smooth(1.2, 7, wv.L)); if (wv.L >= 2) { slope += wv.k * wv.a; sumA += wv.a; } }
   const chop = Math.min(1.0, 0.85 / Math.max(slope, 1e-4));
   let cum = 0;
   for (let i = NW - 1; i >= 0; i--) { const ka = waveCPU[i].k * waveCPU[i].a; cum += 0.5 * ka * ka; waveCum[i] = cum; }
@@ -1020,22 +1020,30 @@ const oceanMat = new THREE.ShaderMaterial({
         vec2 sl = vec2(snoise(q), snoise(q + vec3(17.3, 5.1, 2.7)));
         vec3 q2 = vec3(vXZ * 7.9, uTime * 1.6);
         sl += 0.55 * vec2(snoise(q2 + 3.1), snoise(q2 + vec3(9.2, 1.7, 4.4)));
-        sl *= sqrt(mv) * 0.85 * wMicro;
+        sl *= sqrt(mv) * 0.45 * wMicro;
         n = normalize(vec3(n.x - sl.x, n.y, n.z - sl.y));
       }
-      float m2 = lostVar + mv * (1.0 - wMicro) + 0.006;
+      // mid-distance: gentle noise breaks up any regular pattern the long waves make
+      float midW = smoothstep(15.0, 60.0, dist) * (1.0 - smoothstep(600.0, 2500.0, dist));
+      if (midW > 0.0) {
+        vec2 q3 = vXZ * 0.035 + uTime * 0.012;
+        vec2 sl3 = vec2(vnoise(q3) - vnoise(q3 + vec2(0.37, 0.0)), vnoise(q3) - vnoise(q3 + vec2(0.0, 0.37))) * 0.9;
+        sl3 += 0.5 * vec2(vnoise(q3 * 3.1 + 5.0) - 0.5, vnoise(q3 * 3.1 - 2.0) - 0.5);
+        n = normalize(vec3(n.x + sl3.x * 0.12 * midW, n.y, n.z + sl3.y * 0.12 * midW));
+      }
+      float m2 = lostVar + mv * (1.0 - wMicro) + 0.0035;
 
       if (uBelow < 0.5) {
         float nv = max(dot(n, V), 0.02);
         float F = fresnelW(nv);
         vec3 R = reflect(-V, n); R.y = abs(R.y) + 0.002;
-        vec3 refl = textureCube(uEnv, normalize(R), clamp(sqrt(m2) * 22.0, 0.0, 6.0)).rgb * 0.82;   // wave crests hide part of the mirror
+        vec3 refl = textureCube(uEnv, normalize(R), clamp(1.2 + sqrt(m2) * 22.0, 0.0, 6.0)).rgb * 0.75;   // a soft sheen: wave crests hide part of the mirror
 
         // sun glitter: microfacet (Beckmann / Cox–Munk) highlight
         vec3 H = normalize(uSunDir + V);
         float nh = max(dot(n, H), 1e-3); float nh2 = nh * nh;
         float D = exp(-(1.0 - nh2) / (nh2 * m2)) / (3.14159 * m2 * nh2 * nh2);
-        vec3 spec = min(uSunBeam * uSunVis * fresnelW(max(dot(H, V), 0.0)) * D / (4.0 * nv), vec3(250.0));
+        vec3 spec = min(uSunBeam * uSunVis * fresnelW(max(dot(H, V), 0.0)) * D / (4.0 * nv), vec3(900.0));
 
         // light coming up out of the water: the reef seen through the surface + light scattered by the water
         vec2 uv = gl_FragCoord.xy / uRes;
@@ -1051,7 +1059,7 @@ const oceanMat = new THREE.ShaderMaterial({
         else if (raw0 < 0.99999 && dF0 > dSurf) { floorRad = texture2D(uUnder, uv).rgb; L = (dF0 - dSurf) / uApparent; }
         float sy = max(uSunW.y, 0.15);
         vec3 Ed = uSunEw * sy + uSkyEw + vec3(uFlashU);
-        vec3 Rrs = 0.09 * 0.003 / uKd;                               // remote-sensing reflectance of clear water
+        vec3 Rrs = 0.09 * 0.003 / uKd * vec3(1.0, 2.0, 1.15);        // light scattered back up by clear tropical water (teal-blue)
         vec3 upw = Ed * Rrs * (1.0 - exp(-2.0 * uKd * L));
         vec3 under = floorRad * exp(-uCb * L) * 0.56 + upw;          // 0.56 = 1/n²: radiance leaving water into air
 
@@ -1059,12 +1067,19 @@ const oceanMat = new THREE.ShaderMaterial({
         float crest = clamp(height / max(uAmpSum, 0.05) * 0.5 + 0.5, 0.0, 1.0);
         vec3 Vh = normalize(vec3(V.x, 0.0, V.z) + 1e-4);
         float back = pow(clamp(dot(-Vh, normalize(vec3(uSunDir.x, 0.0, uSunDir.z) + 1e-4)), 0.0, 1.0), 4.0);
-        vec3 sss = uSunEw * exp(-uCb * 1.6) * (0.010 + 0.09 * back) * pow(crest, 3.0) * (1.0 - smoothstep(100.0, 900.0, dist));
+        float face = clamp(1.0 - dot(n, V), 0.0, 1.0);
+        vec3 sss = uSunEw * exp(-uCb * 1.4) * vec3(0.6, 1.0, 0.85) * (0.012 + 0.22 * back) * pow(crest, 2.2) * (0.5 + face) * (1.0 - smoothstep(100.0, 900.0, dist));
 
         vec3 col = refl * F + (under + sss) * (1.0 - F) + spec;
 
         float fn = vnoise(vXZ * 0.9 + uTime * 0.05) * 0.6 + vnoise(vXZ * 3.1 - uTime * 0.08) * 0.4;
         float foam = smoothstep(0.62, 0.30, jac) * smoothstep(0.42, 0.78, fn) * smoothstep(0.2, 0.7, uSea);
+        vec2 wd = vec2(0.5736, -0.8192), wq = vec2(dot(vXZ, wd), dot(vXZ, vec2(-wd.y, wd.x)));
+        float streak = vnoise(wq * vec2(0.08, 0.5) + uTime * 0.02) * 0.65 + vnoise(wq * vec2(0.25, 1.4) - uTime * 0.04) * 0.35;
+        float lace = vnoise(vXZ * 2.6 + uTime * 0.1) * 0.6 + vnoise(vXZ * 7.0 - uTime * 0.15) * 0.4;
+        float cap = smoothstep(0.70, 0.95, crest) * smoothstep(0.42, 0.75, streak) * smoothstep(0.3, 0.62, lace) * smoothstep(0.18, 0.6, uSea);
+        foam = max(foam, cap * 0.9);
+        foam = max(foam, smoothstep(0.62, 0.8, streak) * smoothstep(0.55, 0.75, lace) * 0.22 * smoothstep(0.2, 0.6, uSea));   // old foam drifting in long streaks
         foam *= 1.0 - smoothstep(250.0, 1200.0, dist);
         // boat wake: a Kelvin wedge (always 19.5° each side, at any speed) plus churned water behind the stern
         vec2 bf = vec2(-sin(uBoat.z), -cos(uBoat.z)), br = vec2(cos(uBoat.z), -sin(uBoat.z));
@@ -2635,7 +2650,7 @@ function updateBoat(dt) {
 const camTarget = new THREE.Vector3();
 function placeBoatCamera(dt) {
   if (state.view === 'deck') {
-    camera.position.set(boat.x - Math.sin(boat.hdg) * 2.2, boat.heave + 3.0, boat.z - Math.cos(boat.hdg) * 2.2);
+    camera.position.set(boat.x - Math.sin(boat.hdg) * 4.6, boat.heave + 2.4, boat.z - Math.cos(boat.hdg) * 4.6);   // standing at the bow, in front of the mast
     camera.rotation.set(pitch + boat.pitch * 0.8, yaw, boat.roll * 0.8);
     return;
   }
