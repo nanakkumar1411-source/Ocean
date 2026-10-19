@@ -155,6 +155,13 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--lagoon); ou
 body:not(.diving) .dive-only { display: none !important; }
 body.diving .boat-only { display: none !important; }
 
+#mask {
+  position: fixed; inset: 0; pointer-events: none; display: none;
+  background: radial-gradient(ellipse 64% 72% at 50% 46%, transparent 74%, rgba(2,10,14,.5) 88%, rgba(2,8,12,.96) 100%);
+}
+#mask::before { content: ""; position: absolute; inset: 0; background: radial-gradient(ellipse 60% 70% at 50% 45%, transparent 60%, rgba(150,200,210,.10) 85%, transparent 100%), linear-gradient(115deg, transparent 20%, rgba(255,255,255,.05) 24%, transparent 30%); }
+#mask::after { content: ""; position: absolute; left: 50%; bottom: -6%; width: 10%; height: 18%; transform: translateX(-50%); background: radial-gradient(ellipse at 50% 100%, rgba(2,8,12,.98) 55%, transparent 72%); }
+body.diving.masked #mask { display: block; }
 #splash {
   position: fixed; inset: 0; pointer-events: none; opacity: 0; transition: opacity .45s ease;
   background: radial-gradient(ellipse at 50% 40%, rgba(170, 235, 245, .95), rgba(20, 110, 150, .98) 60%, rgba(5, 40, 70, 1));
@@ -182,6 +189,7 @@ body.diving .boat-only { display: none !important; }
 </style>
 
 <canvas id="c" aria-label="Live 3D ocean and reef. Drag to look around."></canvas>
+<div id="mask" aria-hidden="true"></div>
 
 <header class="plate title">
   <div class="eyebrow">Alif Alif · Indian Ocean</div>
@@ -205,7 +213,7 @@ body.diving .boat-only { display: none !important; }
   <dt class="dive-only">Depth</dt><dd class="dive-only" id="r-depth">—</dd>
   <dt class="dive-only">Pressure</dt><dd class="dive-only" id="r-press">—</dd>
   <dt class="dive-only" title="Share of red, green and blue sunlight still left at this depth">Light left</dt><dd class="dive-only" id="r-light">—</dd>
-  <dt class="dive-only">Water</dt><dd class="dive-only">29 °C · vis 50 m</dd>
+  <dt class="dive-only">Water</dt><dd class="dive-only">29 °C · vis 60 m</dd>
   <dt id="r-strike-l" hidden>Strike</dt><dd id="r-strike" hidden title="Seconds between flash and thunder, divided by 3, is the distance in km">waiting…</dd>
 </dl>
 
@@ -256,6 +264,7 @@ body.diving .boat-only { display: none !important; }
     <button class="chip" data-find="anthias">Sea goldies</button>
     <button class="chip" data-find="dolphin">Spinner dolphins</button>
     <label class="check"><input type="checkbox" id="torch"> Dive light (F)</label>
+    <label class="check"><input type="checkbox" id="maskv"> Mask view (M)</label>
   </div>
   <div class="presets" role="group" aria-label="Time presets">
     <button class="chip" data-t="6.02">Sunrise</button>
@@ -763,7 +772,7 @@ function buildBolt(x, z, dist) {
 // Water absorbs red light fastest, then green; blue travels furthest. That is why shallow water over
 // white sand looks turquoise, deep water looks blue, and colours fade as you dive deeper.
 const KD = [0.36, 0.068, 0.022];   // how fast sunlight fades with depth, per metre (red, green, blue)
-const CB = [0.34, 0.08, 0.050];    // how fast a view through the water fades, per metre (sets ~50 m visibility)
+const CB = [0.30, 0.062, 0.040];   // how fast a view through the water fades, per metre (sets ~60 m visibility)
 const IN_ALB = [0.10, 0.45, 0.68]; // colour of light scattered by the water itself
 const N_WATER = 1.333;             // refractive index of seawater
 const UW = {
@@ -843,7 +852,8 @@ vec3 uwInf(float depth, float rdy, float dist){
 vec3 uwFog(vec3 col, vec3 p){
   if (uFog < 0.5) return col;
   vec3 v = p - cameraPosition; float dist = length(v);
-  return col * exp(-uCb * dist) + uwInf(max(-cameraPosition.y, 0.0), v.y / max(dist, 1e-4), dist);
+  vec3 inf = uwInf(max(-cameraPosition.y, 0.0), v.y / max(dist, 1e-4), dist) * mix(vec3(1.0), vec3(0.8, 0.92, 1.08), 1.0 - exp(-dist / 50.0));   // far water fades to a deeper blue
+  return col * exp(-uCb * dist) + inf;
 }`;
 
 // ---------- Ocean surface: a real wind-sea spectrum (Pierson–Moskowitz) summed as many waves ----------
@@ -1035,7 +1045,21 @@ const oceanMat = new THREE.ShaderMaterial({
       // capillary ripples (finger-sized), drawn only where a pixel is small enough to show them
       float mv = 0.0035 + 0.009 * uSea + 0.02 * uStorm;
       float wMicro = smoothstep(0.14, 0.04, pix);
-      vec3 n = gn;
+      vec3 rainN = vec3(0.0);
+      if (uStorm > 0.05 && dist < 70.0) {           // raindrops hitting the water make small rings that spread and fade
+        for (int k = 0; k < 2; k++) {
+          vec2 rq = vXZ * (k == 0 ? 1.6 : 2.3) + float(k) * 7.3;
+          vec2 id = floor(rq), fr = fract(rq) - 0.5;
+          float h = fract(sin(dot(id, vec2(127.1, 311.7))) * 43758.5453);
+          vec2 o = (vec2(h, fract(h * 13.7)) - 0.5) * 0.5;
+          float ph = fract(uTime * 1.3 + h * 9.0);
+          float rr = length(fr - o), rad = ph * 0.45;
+          float ring = exp(-pow((rr - rad) / 0.025, 2.0)) * (1.0 - ph) * step(h, uStorm);
+          rainN.xz += normalize(fr - o + 1e-4) * ring * 0.35;
+        }
+        rainN *= 1.0 - smoothstep(30.0, 70.0, dist);
+      }
+      vec3 n = normalize(gn + vec3(rainN.x, 0.0, rainN.z));
       if (wMicro > 0.0) {
         vec3 q = vec3(vXZ * 3.2, uTime * 0.9);
         vec2 sl = vec2(snoise(q), snoise(q + vec3(17.3, 5.1, 2.7)));
@@ -1267,6 +1291,17 @@ function buildFloor() {
   }
   g.setAttribute('aCol', new THREE.BufferAttribute(col, 3));
   g.setAttribute('aMat', new THREE.BufferAttribute(mat, 1));
+  const ao = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    let sum = 0, cnt = 0;
+    for (const [di, dj] of [[-2, 0], [2, 0], [0, -2], [0, 2], [-4, 0], [4, 0], [0, -4], [0, 4]]) {
+      const ii = i + di, jj = j + dj; if (ii < 0 || jj < 0 || ii >= n || jj >= n) continue;
+      sum += pos[(jj * n + ii) * 3 + 1]; cnt++;
+    }
+    const v = j * n + i, rise = Math.max(0, sum / cnt - pos[v * 3 + 1]);
+    ao[v] = clamp(1 - rise * 0.45, 0.4, 1);
+  }
+  g.setAttribute('aAO', new THREE.BufferAttribute(ao, 1));
   return g;
 }
 const UW_VERT_HEAD = /* glsl */`
@@ -1277,18 +1312,18 @@ const floorMat = new THREE.ShaderMaterial({
   uniforms: { ...UW }, defines: isTouch ? { LOWQ: 1 } : {},
   vertexShader: /* glsl */`
     ${UW_VERT_HEAD}
-    attribute vec3 aCol; attribute float aMat;
-    varying float vMat;
+    attribute vec3 aCol; attribute float aMat; attribute float aAO;
+    varying float vMat; varying float vAO;
     void main(){
       vec4 wp = modelMatrix * vec4(position, 1.0);
-      vW = wp.xyz; vN = normal; vCol = aCol; vMat = aMat; vLocal = position;
+      vW = wp.xyz; vN = normal; vCol = aCol; vMat = aMat; vLocal = position; vAO = aAO;
       if (wp.y < 0.0) wp.y *= uApparent;     // seen from above, things underwater look ~25% shallower
       gl_Position = projectionMatrix * viewMatrix * wp;
     }`,
   fragmentShader: /* glsl */`
     ${SNOISE_GLSL}
     ${UW_GLSL}
-    varying vec3 vW; varying vec3 vN; varying vec3 vLocal; varying vec3 vCol; varying float vMat;
+    varying vec3 vW; varying vec3 vN; varying vec3 vLocal; varying vec3 vCol; varying float vMat; varying float vAO;
     void main(){
       vec3 n = normalize(vN);
       vec3 a = vCol;
@@ -1310,7 +1345,8 @@ const floorMat = new THREE.ShaderMaterial({
       bump += 0.5 * vec3(snoise(q * 6.0 + 2.0), snoise(q * 6.0 + 5.0), snoise(q * 6.0 + 9.0));
     #endif
       n = normalize(n + bump * 0.55 * (1.0 - sand));
-      vec3 col = uwFog(uwLight(vW, n, a), vW);
+      a *= vAO;
+      vec3 col = uwFog(uwLight(vW, n, a) * mix(0.6, 1.0, vAO), vW);
       gl_FragColor = vec4(col, 1.0);
     }`,
 });
@@ -1806,6 +1842,29 @@ function placeCorals() {
 }
 placeCorals();
 
+// broken coral pieces and shells scattered on the sand near the reef
+{
+  const N = isTouch ? 700 : 1600;
+  const g = new THREE.IcosahedronGeometry(1, 1); const P = g.attributes.position;
+  for (let i = 0; i < P.count; i++) P.setXYZ(i, P.getX(i) * (0.8 + 0.4 * vn(P.getX(i) * 4 + 1, P.getZ(i) * 4)), P.getY(i) * 0.45, P.getZ(i) * 1.5);
+  g.computeVertexNormals();
+  const rub = new THREE.InstancedMesh(g, coralMat, N); rub.frustumCulled = false; rub.count = 0;
+  let sd = 31; const rnd = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
+  const m = new THREE.Matrix4(), q = new THREE.Quaternion(), e = new THREE.Euler(), c = new THREE.Color();
+  for (let i = 0; i < N * 5 && rub.count < N; i++) {
+    const x = (rnd() - 0.5) * 240, z = edgeZ(x) + (rnd() - 0.6) * 40;
+    const f = floorInfo(x, z); if (floorNormal(x, z).y < 0.85) continue;
+    e.set((rnd() - 0.5) * 0.6, rnd() * 6.28, (rnd() - 0.5) * 0.6); q.setFromEuler(e);
+    const sc = 0.03 + Math.pow(rnd(), 2.5) * 0.16;
+    m.compose(new THREE.Vector3(x, f.y + sc * 0.2, z), q, new THREE.Vector3(sc, sc, sc));
+    rub.setMatrixAt(rub.count, m);
+    const tt = rnd(); c.setRGB(0.85 - 0.15 * tt, 0.80 - 0.2 * tt, 0.72 - 0.15 * tt + (rnd() < 0.15 ? 0.1 : 0));
+    rub.setColorAt(rub.count, c); rub.count++;
+  }
+  rub.instanceMatrix.needsUpdate = true; if (rub.instanceColor) rub.instanceColor.needsUpdate = true;
+  uwScene.add(rub);
+}
+
 // seagrass (Thalassia) meadow on the sand by the turtle reef: green turtles graze here
 function seagrassGeo() {
   const list = []; let sd = 3; const rnd = () => (sd = (sd * 16807) % 2147483647) / 2147483647;
@@ -2228,7 +2287,7 @@ const BOAT_SITES = {
 };
 
 // floating particles ("marine snow") that make the water feel like water
-const SNOW_N = isTouch ? 500 : 900;
+const SNOW_N = isTouch ? 800 : 1600;
 const snowGeo = new THREE.BufferGeometry();
 {
   const seed = new Float32Array(SNOW_N * 3); for (let i = 0; i < seed.length; i++) seed[i] = Math.random();
@@ -2446,6 +2505,8 @@ const godMat = new THREE.ShaderMaterial({
       col += accT * 0.0012;
       if (uTorch > 0.5) col += vec3(1.0, 0.96, 0.9) * 70.0 * atan(tMax / 0.632) / 0.632 * exp(-uCb * 1.5) * smoothstep(0.8, 0.97, dot(rd, uTorchDir)) * 0.0004;   // the dive light's beam glowing in the water
       col *= uWB;                       // the eye adapts to blue light, like a camera's white balance
+      float lm = dot(col, vec3(0.2126, 0.7152, 0.0722));
+      col = max(mix(vec3(lm), col, 1.18), 0.0);
       vec2 c = vUv - 0.5; col *= 1.0 - uVig * dot(c, c) * 1.3;
       gl_FragColor = vec4(col, 1.0);
     }`,
@@ -2657,6 +2718,7 @@ $('time').addEventListener('input', e => { state.time = +e.target.value; sunPend
 $('sea').addEventListener('input', e => { seaAnim = null; state.sea = +e.target.value; applySea(); });
 $('cloud').addEventListener('input', e => { state.cloud = +e.target.value; applyCloud(); envDirty = true; });
 $('torch').addEventListener('change', e => { state.torch = e.target.checked; });
+$('maskv').addEventListener('change', e => { document.body.classList.toggle('masked', e.target.checked); });
 document.querySelectorAll('.chip[data-t]').forEach(b => b.addEventListener('click', () => {
   state.time = +b.dataset.t; $('time').value = state.time; applySun();
 
@@ -2683,7 +2745,7 @@ let locked = false, lastMouse = 0, camDist = 17;
 function updateKeysHint() {
   const pre = locked ? '' : 'Click the view to use the mouse · ';
   $('keys').innerHTML = pre + (state.dive
-    ? '<b>WASD</b> swim · <b>Space</b> / <b>C</b> up and down · <b>Shift</b> kick harder · <b>F</b> dive light · <b>E</b> back to the boat'
+    ? '<b>WASD</b> swim · <b>Space</b> / <b>C</b> up and down · <b>Shift</b> kick harder · <b>F</b> dive light · <b>M</b> mask · <b>E</b> back to the boat'
     : '<b>W</b> / <b>S</b> throttle · <b>A</b> / <b>D</b> steer · <b>Shift</b> boost · <b>V</b> change view · <b>E</b> dive in');
 }
 function setMode(dive) {
@@ -2796,6 +2858,7 @@ window.addEventListener('keydown', e => {
   if (!e.repeat) {
     if (k === 'e') { setMode(!(pendingMode ?? state.dive)); return; }
     if (k === 'f' && state.dive) { $('torch').click(); return; }
+    if (k === 'm' && state.dive) { $('maskv').click(); return; }
     if (k === 'v' && !state.dive) { state.view = state.view === 'deck' ? 'chase' : 'deck'; pitch = state.view === 'deck' ? -0.05 : -0.22; return; }
   }
   if (KEYS.includes(k)) { keys.add(k); if (k !== 'Shift') e.preventDefault(); }
